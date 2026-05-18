@@ -1,0 +1,498 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum Role {
+  ADMIN
+  SALES
+  PM
+  FINANCE
+}
+
+enum VisitStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum VisitType {
+  FIRST_MEETING
+  FOLLOW_UP
+  DEMO
+  CONTRACT
+  SUPPORT
+  OTHER
+}
+
+enum OpportunityStage {
+  PROSPECTING
+  QUALIFICATION
+  PROPOSAL
+  NEGOTIATION
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+enum ContractStatus {
+  DRAFT
+  PENDING
+  SIGNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum ContractType {
+  SALES
+  OUTSOURCING
+}
+
+enum InvoiceType {
+  SALES
+  PURCHASE
+}
+
+enum SupplierStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// Models
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  customers    Customer[]
+  opportunities Opportunity[]
+  contracts    Contract[]
+  projects     Project[]
+  visits       Visit[]
+  invoices     Invoice[]
+  payments     Payment[]
+  contacts     Contact[]
+  milestones   Milestone[]
+  tasks        Task[]
+  suppliers    Supplier[]
+  payables     Payable[]
+  todos        Todo[]
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  password      String
+  image         String?
+  role          Role      @default(SALES)
+  teamId        String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  team    Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  accounts Account[]
+  sessions Session[]
+
+  visits       Visit[]
+  opportunityOwners OpportunityOwner[]
+  projectOwners     ProjectOwner[]
+  tasks        Task[]
+  todos        Todo[]
+  assignedTodos Todo[]      @relation("TodoAssignee")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Customer {
+  id          String   @id @default(cuid())
+  name        String
+  industry    String?
+  source      String?
+  level       String?
+  phone       String?
+  email       String?
+  address     String?
+  description String?
+  teamId      String
+  ownerId     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contacts      Contact[]
+  opportunities Opportunity[]
+  contracts     Contract[]
+  visits        Visit[]
+  projects      Project[]
+}
+
+model Contact {
+  id         String   @id @default(cuid())
+  name       String
+  position   String?
+  phone      String?
+  email      String?
+  customerId String
+  teamId     String
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  visits   Visit[]
+}
+
+model Opportunity {
+  id          String           @id @default(cuid())
+  name        String
+  amount      Float            @default(0)
+  stage       OpportunityStage @default(PROSPECTING)
+  probability Int              @default(10)
+  expectedDate DateTime?
+  description String?
+  teamId      String
+  customerId  String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  team     Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  customer Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owners   OpportunityOwner[]
+  visits   Visit[]
+}
+
+model OpportunityOwner {
+  id            String      @id @default(cuid())
+  opportunityId String
+  userId        String
+  createdAt     DateTime    @default(now())
+
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Contract {
+  id            String         @id @default(cuid())
+  name          String
+  number        String         @unique
+  amount        Float          @default(0)
+  startDate     DateTime?
+  endDate       DateTime?
+  status        ContractStatus @default(DRAFT)
+  type          ContractType   @default(SALES)
+  terms         String?
+  teamId        String
+  customerId    String?
+  supplierId    String?
+  opportunityId String?
+  salesContractId String?
+  invoicedAmount Float         @default(0)
+  paidAmount    Float          @default(0)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  team               Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  customer           Customer?    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  supplier           Supplier?    @relation(fields: [supplierId], references: [id])
+  salesContract      Contract?    @relation("OutsourcingToSales", fields: [salesContractId], references: [id])
+  outsourcingContracts Contract[]  @relation("OutsourcingToSales")
+  invoices           Invoice[]
+  payments           Payment[]
+  payables           Payable[]
+}
+
+model Project {
+  id          String         @id @default(cuid())
+  name        String
+  description String?
+  status      ProjectStatus  @default(PLANNING)
+  startDate   DateTime?
+  endDate     DateTime?
+  budget      Float          @default(0)
+  teamId      String
+  customerId  String
+  contractId  String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  customer  Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  owners   ProjectOwner[]
+  visits   Visit[]
+  tasks    Task[]
+  milestones Milestone[]
+}
+
+model ProjectOwner {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  status      String   @default("TODO")
+  dueDate     DateTime?
+  projectId   String
+  teamId      String
+  assigneeId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  assignee User?   @relation(fields: [assigneeId], references: [id])
+}
+
+model Milestone {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  dueDate     DateTime?
+  status      String    @default("PENDING")
+  projectId   String
+  teamId      String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  project Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team    Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+}
+
+model Visit {
+  id          String      @id @default(cuid())
+  title       String
+  type        VisitType   @default(FOLLOW_UP)
+  status      VisitStatus @default(PLANNED)
+  startTime   DateTime
+  endTime     DateTime
+  location    String?
+  description String?
+  notes       String?     @db.Text
+  keyPoints   String?     @db.Text
+  nextSteps   String?     @db.Text
+  rating      Int?
+  nextContactDate DateTime?
+  reminder    DateTime?
+  attendees   String[]
+  attachments String[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  teamId        String
+  customerId    String
+  contactId     String?
+  opportunityId String?
+  projectId     String?
+  createdById   String
+
+  team        Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  contact     Contact?    @relation(fields: [contactId], references: [id])
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id])
+  project     Project?    @relation(fields: [projectId], references: [id])
+  createdBy   User        @relation(fields: [createdById], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id          String        @id @default(cuid())
+  number      String        @unique
+  amount      Float
+  taxAmount   Float         @default(0)
+  totalAmount Float
+  issueDate   DateTime
+  dueDate     DateTime
+  status      InvoiceStatus @default(DRAFT)
+  type        InvoiceType   @default(SALES)
+  description String?
+  teamId      String
+  contractId  String?
+  supplierId  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contract  Contract? @relation(fields: [contractId], references: [id])
+  supplier  Supplier? @relation(fields: [supplierId], references: [id])
+  payments  Payment[]
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  amount      Float
+  paymentDate DateTime
+  method      String?
+  reference   String?
+  status      PaymentStatus @default(PENDING)
+  notes       String?
+  teamId      String
+  invoiceId   String?
+  contractId  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  team     Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  invoice  Invoice? @relation(fields: [invoiceId], references: [id])
+  contract Contract? @relation(fields: [contractId], references: [id])
+}
+
+model Supplier {
+  id            String         @id @default(cuid())
+  name          String
+  code          String         @unique
+  contact       String?
+  phone         String?
+  email         String?
+  address       String?
+  paymentTerms  String?
+  notes         String?
+  status        SupplierStatus @default(ACTIVE)
+  teamId        String
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contracts Contract[]
+  invoices  Invoice[]
+  payables  Payable[]
+}
+
+model Payable {
+  id          String        @id @default(cuid())
+  amount      Float
+  paymentDate DateTime?
+  dueDate     DateTime
+  method      String?
+  reference   String?
+  status      PaymentStatus @default(PENDING)
+  notes       String?
+  teamId      String
+  contractId  String?
+  supplierId  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  team     Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contract Contract? @relation(fields: [contractId], references: [id])
+  supplier Supplier? @relation(fields: [supplierId], references: [id])
+}
+
+model Attachment {
+  id          String   @id @default(cuid())
+  name        String
+  filename    String
+  path        String
+  size        Int
+  mimeType    String
+  teamId      String
+  contractId  String?
+  invoiceId   String?
+  createdAt   DateTime @default(now())
+}
+
+model Todo {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  status      TodoStatus @default(TODO)
+  priority    Priority   @default(MEDIUM)
+  dueDate     DateTime?
+  completedAt DateTime?
+  teamId      String
+  creatorId   String
+  assigneeId  String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  team      Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  creator   User    @relation(fields: [creatorId], references: [id])
+  assignee  User?   @relation("TodoAssignee", fields: [assigneeId], references: [id])
+}
+
+enum TodoStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}

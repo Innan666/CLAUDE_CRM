@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: salesflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-salesflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salesflow_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-salesflow}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-salesflow} -d ${POSTGRES_DB:-salesflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - salesflow_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: salesflow_app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-salesflow}:${POSTGRES_PASSWORD:-salesflow_pass}@db:5432/${POSTGRES_DB:-salesflow}?schema=public
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-}
+    volumes:
+      - uploads_data:/app/public/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - salesflow_net
+
+volumes:
+  postgres_data:
+  uploads_data:
+
+networks:
+  salesflow_net:
+    driver: bridge

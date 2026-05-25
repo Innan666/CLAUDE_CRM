@@ -7,6 +7,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-salesflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salesflow_pass}
       POSTGRES_DB: ${POSTGRES_DB:-salesflow}
+    ports:
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

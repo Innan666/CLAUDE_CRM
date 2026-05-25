@@ -13,288 +13,196 @@ interface ChatRequest {
   history: Message[]
 }
 
-// 数据库 Schema 文档
-const DATABASE_SCHEMA = `
-## CRM 数据库
-
-### 数据模型:
-- Customer: id, name, industry, level, phone, email, address
-- Contact: id, name, position, phone, email, customerId
-- Opportunity: id, name, amount, stage, probability, customerId
-- Contract: id, name, number, amount, status, type, customerId, supplierId, paidAmount, invoicedAmount
-- Project: id, name, budget, status, customerId, contractId
-- Invoice: id, number, amount, status, type, contractId
-- Payment: id, amount, paymentDate, status, invoiceId, contractId
-- Supplier: id, name, code, contact, phone
-- Visit: id, title, type, status, customerId
-`
-
-// 可用工具列表
-const TOOLS_SCHEMA = allTools.map(t => ({
-  name: t.name,
-  description: t.description,
-  input_schema: t.inputSchema
-}))
-
-// 获取数据库上下文
-async function getDatabaseContext(teamId: string): Promise<string> {
-  const [customers, opportunities, contracts, projects, invoices, suppliers, visits] = await Promise.all([
-    prisma.customer.findMany({
-      where: { teamId },
-      select: { id: true, name: true, industry: true, level: true },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.opportunity.findMany({
-      where: { teamId },
-      select: { id: true, name: true, amount: true, stage: true, customer: { select: { name: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.contract.findMany({
-      where: { teamId },
-      select: { id: true, name: true, number: true, amount: true, status: true, type: true, paidAmount: true, invoicedAmount: true, customer: { select: { name: true } }, supplier: { select: { name: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.project.findMany({
-      where: { teamId },
-      select: { id: true, name: true, budget: true, status: true, customer: { select: { name: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.invoice.findMany({
-      where: { teamId },
-      select: { id: true, number: true, amount: true, status: true, type: true },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.supplier.findMany({
-      where: { teamId },
-      select: { id: true, name: true, code: true },
-      orderBy: { createdAt: 'desc' },
-      take: 20
-    }),
-    prisma.visit.findMany({
-      where: { teamId },
-      select: { id: true, title: true, type: true, status: true, customer: { select: { name: true } } },
-      orderBy: { startTime: 'desc' },
-      take: 10
-    })
+// Layer 1: Compact index of all entities (names + IDs only). Always included, stays small even with hundreds of records.
+async function getEntityIndex(teamId: string): Promise<{
+  index: string
+  customers: { id: string; name: string }[]
+  opportunities: { id: string; name: string }[]
+  contracts: { id: string; name: string }[]
+  projects: { id: string; name: string }[]
+  suppliers: { id: string; name: string }[]
+}> {
+  const [customers, opportunities, contracts, projects, suppliers, todos] = await Promise.all([
+    prisma.customer.findMany({ where: { teamId }, select: { id: true, name: true }, orderBy: { updatedAt: "desc" }, take: 50 }),
+    prisma.opportunity.findMany({ where: { teamId }, select: { id: true, name: true, stage: true }, orderBy: { updatedAt: "desc" }, take: 30 }),
+    prisma.contract.findMany({ where: { teamId }, select: { id: true, name: true, number: true, status: true }, orderBy: { updatedAt: "desc" }, take: 30 }),
+    prisma.project.findMany({ where: { teamId }, select: { id: true, name: true, status: true }, orderBy: { updatedAt: "desc" }, take: 20 }),
+    prisma.supplier.findMany({ where: { teamId }, select: { id: true, name: true, code: true }, orderBy: { updatedAt: "desc" }, take: 20 }),
+    prisma.todo.findMany({ where: { teamId, status: { not: "DONE" } }, select: { id: true, title: true, priority: true }, orderBy: { createdAt: "desc" }, take: 15 }),
   ])
 
-  return `
-客户: ${customers.map(c => `${c.name}(${c.industry||'-'})`).join(', ') || '无'}
-商机: ${opportunities.map(o => `${o.name}¥${o.amount}(${o.stage})`).join(', ') || '无'}
-合同: ${contracts.map(c => `${c.name}¥${c.amount}已付¥${c.paidAmount}(${c.status})`).join(', ') || '无'}
-项目: ${projects.map(p => `${p.name}¥${p.budget}(${p.status})`).join(', ') || '无'}
-发票: ${invoices.map(i => `${i.number}¥${i.amount}(${i.status})`).join(', ') || '无'}
-拜访: ${visits.map(v => `${v.title}(${v.status})`).join(', ') || '无'}
-供应商: ${suppliers.map(s => `${s.name}(${s.code})`).join(', ') || '无'}
-`
+  const index = `【客户索引】${customers.map(c => `${c.name}[${c.id}]`).join("、") || "无"}
+【商机索引】${opportunities.map(o => `${o.name}[${o.id}](${o.stage})`).join("、") || "无"}
+【合同索引】${contracts.map(c => `${c.name}[${c.id}](${c.number},${c.status})`).join("、") || "无"}
+【项目索引】${projects.map(p => `${p.name}[${p.id}](${p.status})`).join("、") || "无"}
+【供应商索引】${suppliers.map(s => `${s.name}[${s.id}](${s.code})`).join("、") || "无"}
+【待办索引】${todos.map(t => `${t.title}[${t.id}](${t.priority})`).join("、") || "无"}`
+
+  return { index, customers, opportunities, contracts, projects, suppliers }
 }
 
-// 解析工具调用
+// Layer 2: Fetch full details only for entities whose names appear in the current query.
+async function getQueryContext(
+  teamId: string,
+  userMessage: string,
+  history: Message[],
+  index: Awaited<ReturnType<typeof getEntityIndex>>
+): Promise<string> {
+  const searchText = [userMessage, ...history.slice(-4).map(m => m.content)].join(" ")
+  const parts: string[] = []
+
+  // List-intent detection: user wants complete records, not just what's in the limited index.
+  // Inject a directive so the AI calls list_* tools instead of relying on index data.
+  const LIST_TRIGGERS = ["所有", "全部", "全量", "列出", "所有的", "一共有多少", "有多少", "统计", "汇总", "整体分析", "分析一下", "总览"]
+  const ENTITY_INTENT_MAP = [
+    { keywords: ["客户"],         tool: "list_customers",     label: "客户" },
+    { keywords: ["商机"],         tool: "list_opportunities",  label: "商机" },
+    { keywords: ["合同"],         tool: "list_contracts",      label: "合同" },
+    { keywords: ["项目"],         tool: "list_projects",       label: "项目" },
+    { keywords: ["供应商"],       tool: "list_suppliers",      label: "供应商" },
+    { keywords: ["待办", "任务"], tool: "list_todos",          label: "待办" },
+    { keywords: ["拜访"],         tool: "list_visits",         label: "拜访" },
+  ]
+
+  const hasListTrigger = LIST_TRIGGERS.some(k => userMessage.includes(k))
+  if (hasListTrigger) {
+    const matched = ENTITY_INTENT_MAP.filter(e => e.keywords.some(k => userMessage.includes(k)))
+    if (matched.length > 0) {
+      parts.push(`【重要指令】用户请求完整数据，索引仅包含部分记录，必须调用工具获取完整结果：${matched.map(e => `${e.label} → 调用 ${e.tool}`).join("、")}`)
+    } else {
+      parts.push(`【重要指令】用户请求查看完整数据，索引数据有限，请主动调用相关 list_* 工具后再作答，不要仅凭索引中的有限条目作答`)
+    }
+  }
+
+  const mentionedCustomerIds = index.customers.filter(c => searchText.includes(c.name)).map(c => c.id)
+  if (mentionedCustomerIds.length > 0) {
+    const details = await prisma.customer.findMany({
+      where: { id: { in: mentionedCustomerIds }, teamId },
+      include: {
+        contacts: { select: { id: true, name: true, position: true, phone: true, email: true }, take: 5 },
+        opportunities: { select: { id: true, name: true, stage: true, amount: true }, take: 5, orderBy: { updatedAt: "desc" } },
+        contracts: { select: { id: true, name: true, number: true, status: true, amount: true, paidAmount: true }, take: 5, orderBy: { updatedAt: "desc" } },
+        visits: { select: { id: true, title: true, status: true, startTime: true }, take: 3, orderBy: { startTime: "desc" } },
+      },
+    })
+    parts.push(`【相关客户详情】${JSON.stringify(details, null, 0)}`)
+  }
+
+  const mentionedOppIds = index.opportunities.filter(o => searchText.includes(o.name)).map(o => o.id)
+  if (mentionedOppIds.length > 0) {
+    const details = await prisma.opportunity.findMany({
+      where: { id: { in: mentionedOppIds }, teamId },
+      include: { customer: { select: { id: true, name: true } } },
+    })
+    parts.push(`【相关商机详情】${JSON.stringify(details, null, 0)}`)
+  }
+
+  const mentionedContractIds = index.contracts.filter(c => searchText.includes(c.name)).map(c => c.id)
+  if (mentionedContractIds.length > 0) {
+    const details = await prisma.contract.findMany({
+      where: { id: { in: mentionedContractIds }, teamId },
+      include: { customer: { select: { id: true, name: true } }, supplier: { select: { id: true, name: true } } },
+    })
+    parts.push(`【相关合同详情】${JSON.stringify(details, null, 0)}`)
+  }
+
+  const mentionedProjectIds = index.projects.filter(p => searchText.includes(p.name)).map(p => p.id)
+  if (mentionedProjectIds.length > 0) {
+    const details = await prisma.project.findMany({
+      where: { id: { in: mentionedProjectIds }, teamId },
+      include: { customer: { select: { id: true, name: true } } },
+    })
+    parts.push(`【相关项目详情】${JSON.stringify(details, null, 0)}`)
+  }
+
+  const mentionedSupplierIds = index.suppliers.filter(s => searchText.includes(s.name)).map(s => s.id)
+  if (mentionedSupplierIds.length > 0) {
+    const details = await prisma.supplier.findMany({
+      where: { id: { in: mentionedSupplierIds }, teamId },
+    })
+    parts.push(`【相关供应商详情】${JSON.stringify(details, null, 0)}`)
+  }
+
+  return parts.join("\n")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tool call detection (same patterns as before)
+// ──────────────────────────────────────────────────────────────────────────────
 function parseToolCalls(content: string): { name: string; args: any }[] {
   const toolCalls: { name: string; args: any }[] = []
-
-  // 格式0: {"tool": "xxx", "args": {...}} - 优先解析 JSON 格式
-  const jsonPattern = /\{"tool":\s*"([^"]+)",\s*"args":\s*(\{[\s\S]*?\})\s*\}/g
   let match
+
+  const jsonPattern = /\{"tool":\s*"([^"]+)",\s*"args":\s*(\{[\s\S]*?\})\s*\}/g
   while ((match = jsonPattern.exec(content)) !== null) {
     try {
       const name = match[1]
       const args = JSON.parse(match[2])
-      if (!toolCalls.find(t => t.name === name)) {
-        toolCalls.push({ name, args })
-      }
-    } catch (e) {}
+      if (!toolCalls.find(t => t.name === name)) toolCalls.push({ name, args })
+    } catch {}
   }
 
-  // 格式1: <invoke name="xxx"> 或 <invoke name="xxx"><parameter name="xxx">value</parameter></invoke>
   const invokePattern = /<invoke\s+name=["']([^"']+)["']>([\s\S]*?)<\/invoke>/g
   while ((match = invokePattern.exec(content)) !== null) {
     const name = match[1]
-    const paramsContent = match[2]
-
-    // 解析参数
     const args: any = {}
     const paramPattern = /<parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/parameter>/g
     let paramMatch
-    while ((paramMatch = paramPattern.exec(paramsContent)) !== null) {
-      const paramName = paramMatch[1]
-      let paramValue = paramMatch[2].trim()
-
-      // 尝试解析 JSON 值
-      try {
-        if (paramValue.startsWith('{') || paramValue.startsWith('[')) {
-          args[paramName] = JSON.parse(paramValue)
-        } else if (/^\d+$/.test(paramValue)) {
-          args[paramName] = parseInt(paramValue)
-        } else {
-          args[paramName] = paramValue
-        }
-      } catch {
-        args[paramName] = paramValue
-      }
+    while ((paramMatch = paramPattern.exec(match[2])) !== null) {
+      const val = paramMatch[2].trim()
+      try { args[paramMatch[1]] = (val.startsWith("{") || val.startsWith("[")) ? JSON.parse(val) : /^\d+$/.test(val) ? parseInt(val) : val }
+      catch { args[paramMatch[1]] = val }
     }
-
-    // 检查是否已有同名工具
-    if (!toolCalls.find(t => t.name === name)) {
-      toolCalls.push({ name, args })
-    }
+    if (!toolCalls.find(t => t.name === name)) toolCalls.push({ name, args })
   }
 
-  // 格式2: {tool => "xxx", args => {...}}
-  const toolArrowPattern = /\{[\s\S]*?tool\s*=>\s*["']([^"']+)["'][\s\S]*?args\s*=>\s*\{[\s\S]*?\}[\s\S]*?\}/g
-  while ((match = toolArrowPattern.exec(content)) !== null) {
-    try {
-      const name = match[1]
-      // 提取 args 部分
-      const argsMatch = match[0].match(/args\s*=>\s*\{([\s\S]*?)\}/)
-      if (argsMatch) {
-        const argsStr = argsMatch[1].replace(/(\w+)\s*=>\s*/g, '"$1": ').replace(/'/g, '"')
-        const args = JSON.parse(`{${argsStr}}`)
-        if (!toolCalls.find(t => t.name === name)) {
-          toolCalls.push({ name, args })
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 格式3: [TOOL_CALL] {tool => "xxx", args => {...}} [/TOOL_CALL]
-  const toolCallBlockPattern = /\[TOOL_CALL\]\s*\{[\s\S]*?tool\s*=>\s*["']([^"']+)["'][\s\S]*?args\s*=>\s*\{[\s\S]*?\}[\s\S]*?\}\s*\[\/TOOL_CALL\]/g
-  while ((match = toolCallBlockPattern.exec(content)) !== null) {
-    try {
-      const name = match[1]
-      const argsMatch = match[0].match(/args\s*=>\s*\{([\s\S]*?)\}/)
-      if (argsMatch) {
-        const argsStr = argsMatch[1].replace(/(\w+)\s*=>\s*/g, '"$1": ').replace(/'/g, '"')
-        const args = JSON.parse(`{${argsStr}}`)
-        if (!toolCalls.find(t => t.name === name)) {
-          toolCalls.push({ name, args })
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 格式4: <tool_call> [ { tool => 'xxx', args => { key="value" } } ] </tool_call>
-  const toolCallXmlPattern = /<tool_call>\s*\[\s*\{[\s\S]*?tool\s*=>\s*['"]([^'"]+)['"][\s\S]*?args\s*=>\s*\{([\s\S]*?)\}[\s\S]*?\}\s*\]\s*<\/tool_call>/g
-  while ((match = toolCallXmlPattern.exec(content)) !== null) {
-    try {
-      const name = match[1]
-      const argsStr = match[2]
-      // 转换 key="value" 格式为 "key": "value"
-      const convertedArgs = argsStr.replace(/(\w+)=(".*?")/g, '"$1": $2')
-      const args = JSON.parse(`{${convertedArgs}}`)
-      if (!toolCalls.find(t => t.name === name)) {
-        toolCalls.push({ name, args })
-      }
-    } catch (e) {
-      console.log("Failed to parse tool_call format 4:", e)
-    }
-  }
-
-  // 格式5: <tool_code>list_customers</tool_code>
-  const toolCodePattern = /<tool_code>([^<\s]+)<\/tool_code>/g
-  while ((match = toolCodePattern.exec(content)) !== null) {
-    const name = match[1].trim()
-    if (name && !toolCalls.find(t => t.name === name)) {
-      toolCalls.push({ name, args: {} })
-    }
-  }
-
-  // 格式6: <tool_code>xxx<param name="key">value</param></tool_code>
-  const toolCodeWithParamsPattern = /<tool_code>(\w+)([\s\S]*?)<\/tool_code>/g
-  while ((match = toolCodeWithParamsPattern.exec(content)) !== null) {
-    const name = match[1].trim()
-    const paramsContent = match[2]
-
-    const args: any = {}
-    const paramPattern = /<param\s+name=["']([^"']+)["']>([\s\S]*?)<\/param>/g
-    let paramMatch
-    while ((paramMatch = paramPattern.exec(paramsContent)) !== null) {
-      const paramName = paramMatch[1]
-      let paramValue = paramMatch[2].trim()
-      try {
-        if (paramValue.startsWith('{') || paramValue.startsWith('[')) {
-          args[paramName] = JSON.parse(paramValue)
-        } else if (/^\d+$/.test(paramValue)) {
-          args[paramName] = parseInt(paramValue)
-        } else {
-          args[paramName] = paramValue
-        }
-      } catch {
-        args[paramName] = paramValue
-      }
-    }
-
-    if (!toolCalls.find(t => t.name === name)) {
-      toolCalls.push({ name, args })
-    }
-  }
-
-  // 格式6: <tool_call> { tool => 'xxx', args => { key="value" } } </tool_call>
-  const toolCallSimplePattern = /<tool_call>\s*\{[\s\S]*?tool\s*=>\s*['"]([^'"]+)['"][\s\S]*?args\s*=>\s*\{([\s\S]*?)\}[\s\S]*?\}\s*<\/tool_call>/g
-  while ((match = toolCallSimplePattern.exec(content)) !== null) {
-    try {
-      const name = match[1]
-      const argsStr = match[2]
-      const convertedArgs = argsStr.replace(/(\w+)=(".*?")/g, '"$1": $2')
-      const args = JSON.parse(`{${convertedArgs}}`)
-      if (!toolCalls.find(t => t.name === name)) {
-        toolCalls.push({ name, args })
-      }
-    } catch (e) {
-      console.log("Failed to parse tool_call format 5:", e)
-    }
-  }
-
-  // 格式4: ```json { "tool": "xxx", "args": {...} } ```
   const codeBlockPattern = /```json\s*\{[\s\S]*?"tool"\s*:\s*"([^"]+)"[\s\S]*?"args"\s*:\s*(\{[\s\S]*?\})\s*\}[\s\S]*?```/g
   while ((match = codeBlockPattern.exec(content)) !== null) {
     try {
       const name = match[1]
-      const args = JSON.parse(match[2].replace(/,\s*}/g, '}'))
-      if (!toolCalls.find(t => t.name === name)) {
-        toolCalls.push({ name, args })
-      }
-    } catch (e) {}
+      const args = JSON.parse(match[2].replace(/,\s*}/g, "}"))
+      if (!toolCalls.find(t => t.name === name)) toolCalls.push({ name, args })
+    } catch {}
   }
 
   return toolCalls
 }
 
-// 流式调用 API
-async function callAPIStream(apiKey: string, baseUrl: string, messages: any[], onChunk: (chunk: string) => void) {
+// ──────────────────────────────────────────────────────────────────────────────
+// Buffered API call — reads the full response before returning.
+// Returns { text, reasoning } without streaming anything to the client.
+// ──────────────────────────────────────────────────────────────────────────────
+async function callAPIBuffer(
+  apiKey: string,
+  baseUrl: string,
+  messages: any[]
+): Promise<{ text: string; reasoning: string }> {
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "MiniMax-M2.5",
+      model: "MiniMax-M2.7",
       messages,
       max_tokens: 4096,
       thinking: { type: "enabled", budget: 4096 },
-      stream: true
-    })
+      stream: true,
+    }),
   })
 
   if (!response.ok) {
     const errorText = await response.text()
     throw new Error(`API error: ${response.status} - ${errorText}`)
   }
-
-  if (!response.body) {
-    throw new Error("No response body")
-  }
+  if (!response.body) throw new Error("No response body")
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
   let fullText = ""
+  let fullReasoning = ""
 
   while (true) {
     const { done, value } = await reader.read()
@@ -306,92 +214,90 @@ async function callAPIStream(apiKey: string, baseUrl: string, messages: any[], o
 
     for (const line of lines) {
       const trimmed = line.trim()
-      if (!trimmed || !trimmed.startsWith("data:")) continue
-
+      if (!trimmed.startsWith("data:")) continue
       const dataStr = trimmed.slice(5).trim()
       if (!dataStr || dataStr === "[DONE]") continue
-
       try {
         const data = JSON.parse(dataStr)
-
         if (data.type === "content_block_delta") {
           const delta = data.delta
-          if (delta?.type === "text_delta") {
-            fullText += delta.text || ""
-            onChunk(JSON.stringify({ type: "text", content: delta.text }))
-          } else if (delta?.type === "thinking_delta") {
-            onChunk(JSON.stringify({ type: "thinking", content: delta.thinking || delta.text || "" }))
-          }
+          if (delta?.type === "text_delta") fullText += delta.text || ""
+          else if (delta?.type === "thinking_delta") fullReasoning += delta.thinking || delta.text || ""
         }
-      } catch (e) {
-        // 忽略解析错误
-      }
+      } catch {}
     }
   }
 
-  return fullText
+  return { text: fullText, reasoning: fullReasoning }
 }
 
-// 执行工具并生成最终回复
-async function processWithTools(apiKey: string, baseUrl: string, messages: any[], onChunk: (chunk: string) => void): Promise<string> {
+// ──────────────────────────────────────────────────────────────────────────────
+// Agentic loop: buffer each round, detect tool calls, execute them.
+// Only emits clean content to onChunk — never raw tool-call JSON.
+//
+// SSE event types emitted:
+//   { type: "thinking",    content: "..." }
+//   { type: "tool_call",   tool: "list_customers" }
+//   { type: "tool_result", tool: "list_customers", success: true }
+//   { type: "text",        content: "..." }   ← final answer only
+// ──────────────────────────────────────────────────────────────────────────────
+async function processWithTools(
+  apiKey: string,
+  baseUrl: string,
+  messages: any[],
+  onChunk: (chunk: string) => void
+): Promise<void> {
   const maxIterations = 5
-  let currentIteration = 0
 
-  while (currentIteration < maxIterations) {
-    currentIteration++
+  for (let i = 0; i < maxIterations; i++) {
+    const { text, reasoning } = await callAPIBuffer(apiKey, baseUrl, messages)
 
-    // 第一轮：获取 AI 回复
-    if (currentIteration === 1) {
-      onChunk(JSON.stringify({ type: "status", content: "正在分析您的问题..." }))
+    // Always forward thinking/reasoning to the client
+    if (reasoning) {
+      onChunk(JSON.stringify({ type: "thinking", content: reasoning }))
     }
 
-    let fullText = await callAPIStream(apiKey, baseUrl, messages, onChunk)
-
-    // 调试：打印原始返回内容
-    console.log("=== AI Raw Response ===")
-    console.log(fullText)
-    console.log("=== End Raw Response ===")
-
-    // 检查是否需要工具调用
-    const toolCalls = parseToolCalls(fullText)
-    console.log(`Iteration ${currentIteration}: Found ${toolCalls.length} tool calls`, toolCalls)
+    const toolCalls = parseToolCalls(text)
 
     if (toolCalls.length === 0) {
-      // 没有更多工具调用，返回最终结果
-      return fullText
+      // No tool calls → this is the final user-visible answer
+      onChunk(JSON.stringify({ type: "text", content: text }))
+      return
     }
 
-    // 发送工具调用状态
-    onChunk(JSON.stringify({ type: "status", content: `正在执行 ${toolCalls.length} 个操作...` }))
+    // ── Tool execution round ──────────────────────────────────────────────────
+    // Add the raw (tool-call-containing) assistant turn to history,
+    // but DO NOT forward it to the client.
+    messages.push({
+      role: "assistant",
+      content: [{ type: "text", text }],
+    })
 
-    // 添加助手消息
-    messages.push({ role: "assistant", content: fullText })
-
-    // 执行工具
     for (const toolCall of toolCalls) {
-      console.log(`Executing tool: ${toolCall.name}`, toolCall.args)
+      onChunk(JSON.stringify({ type: "tool_call", tool: toolCall.name }))
+
       const result = await executeTool(toolCall.name, toolCall.args)
 
-      // 发送工具执行结果
-      const resultMsg = result.success
-        ? `✓ ${toolCall.name} 执行成功`
-        : `✗ ${toolCall.name} 执行失败: ${result.error}`
-      onChunk(JSON.stringify({ type: "status", content: resultMsg }))
+      onChunk(JSON.stringify({ type: "tool_result", tool: toolCall.name, success: result.success }))
 
-      // 添加结果到消息历史
       messages.push({
         role: "user",
-        content: `工具 ${toolCall.name} 执行结果:\n${JSON.stringify(result, null, 2)}`
+        content: [
+          {
+            type: "text",
+            text: `工具 ${toolCall.name} 执行结果:\n${JSON.stringify(result, null, 2)}`,
+          },
+        ],
       })
     }
-
-    // 继续下一轮，AI 可能会继续调用工具或生成回复
-    onChunk(JSON.stringify({ type: "status", content: "等待进一步操作..." }))
   }
 
-  return "已达到最大工具调用次数"
+  onChunk(JSON.stringify({ type: "text", content: "已达到最大处理次数，请重新提问。" }))
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/chat
+// ──────────────────────────────────────────────────────────────────────────────
 export async function POST(request: Request) {
   try {
     const session = await auth()
@@ -401,98 +307,104 @@ export async function POST(request: Request) {
 
     const body: ChatRequest = await request.json()
     const { message } = body
-
     if (!message?.trim()) {
       return NextResponse.json({ error: "消息不能为空" }, { status: 400 })
     }
 
-    // 获取数据库上下文
-    const dbContext = await getDatabaseContext(session.user.teamId)
+    const entityData = await getEntityIndex(session.user.teamId)
+    const queryContext = await getQueryContext(session.user.teamId, message, body.history, entityData)
 
-    // 构建系统提示
-    const toolExamples = `
-【必须严格遵循】工具调用格式 - 必须使用以下 JSON 格式：
-查询客户: {"tool": "list_customers", "args": {"name": "客户名"}}
-查询商机: {"tool": "list_opportunities", "args": {}}
-查询合同: {"tool": "get_contract", "args": {"id": "合同ID"}}
-创建客户: {"tool": "create_customer", "args": {"name": "公司名", "phone": "电话"}}
-创建拜访: {"tool": "create_visit", "args": {"title": "拜访标题", "startTime": "2026-03-10T14:00:00", "endTime": "2026-03-10T15:00:00", "customerId": "客户ID", "type": "FOLLOW_UP"}}
-创建合同: {"tool": "create_contract", "args": {"name": "合同名称", "amount": 100000, "customerId": "客户ID"}}
-创建商机: {"tool": "create_opportunity", "args": {"name": "商机名称", "amount": 500000, "stage": "PROSPECTING", "customerId": "客户ID"}}
+    const staticInstructions = `你是CRM系统智能助手。使用工具查询和操作数据，用简洁中文回复用户。
 
-日期格式要求: 必须使用 ISO 格式如 2026-03-10T14:00:00
-类型要求: visit type 用 FOLLOW_UP/MEETING/DEMO/OTHER, opportunity stage 用 PROSPECTING/QUALIFICATION/PROPOSAL/NEGOTIATION/WON/LOST
-重要: 只输出 JSON，不要输出其他文字！`
+## 数据模型枚举值（严格使用，不要自创）:
+- VisitType: FIRST_MEETING | FOLLOW_UP | DEMO | CONTRACT | SUPPORT | OTHER
+- OpportunityStage: PROSPECTING | QUALIFICATION | PROPOSAL | NEGOTIATION | CLOSED_WON | CLOSED_LOST
+- ContractStatus: DRAFT | PENDING | SIGNED | ACTIVE | COMPLETED | CANCELLED
+- ContractType: SALES | OUTSOURCING
+- ProjectStatus: PLANNING | IN_PROGRESS | ON_HOLD | COMPLETED | CANCELLED
+- InvoiceStatus: DRAFT | ISSUED | PAID | OVERDUE | CANCELLED
+- InvoiceType: SALES | PURCHASE
+- PaymentStatus: PENDING | COMPLETED | FAILED
+- TodoStatus: TODO | IN_PROGRESS | DONE
+- Priority: LOW | MEDIUM | HIGH | URGENT
 
-    const systemPrompt = `你是CRM系统智能助手。你可以使用工具来查询和操作CRM数据。
+## 可用工具（共${allTools.length}个）:
+${allTools.map(t => `- ${t.name}: ${t.description}`).join("\n")}
 
-${DATABASE_SCHEMA}
+## 工具调用规则:
+1. 调用工具时只输出一行 JSON，格式: {"tool": "工具名", "args": {参数}}
+2. 收到工具结果后用中文整理返回给用户，不要暴露原始JSON
+3. 需要ID时优先从下方"数据索引"中提取，如找不到先调用 list_* 工具查询
+4. 创建拜访必须提供 customerId（从客户索引获取）和 startTime（ISO格式如 2026-05-25T14:00:00）
+5. 创建商机必须提供 customerId
+6. 禁止编造不存在的ID
 
-当前数据:
-${dbContext}
+## 示例:
+{"tool": "list_customers", "args": {}}
+{"tool": "get_customer", "args": {"id": "客户ID"}}
+{"tool": "update_opportunity", "args": {"id": "商机ID", "stage": "CLOSED_WON"}}
+{"tool": "create_visit", "args": {"title": "首次拜访", "customerId": "客户ID", "startTime": "2026-05-26T10:00:00", "type": "FIRST_MEETING"}}
+{"tool": "create_todo", "args": {"title": "跟进合同签署", "priority": "HIGH"}}`
 
-## 可用工具:
-${TOOLS_SCHEMA.map(t => `- ${t.name}: ${t.description}`).join('\n')}
+    const systemPrompt = `${staticInstructions}
 
-${toolExamples}`
+## 当前数据索引（方括号内为ID，可直接用于工具调用）:
+${entityData.index}${queryContext ? `\n\n## 本次查询相关详情:\n${queryContext}` : ""}`
 
     const apiKey = process.env.MINIMAX_API_KEY
     const baseUrl = process.env.MINIMAX_BASE_URL || "https://api.minimaxi.com/anthropic"
 
     if (!apiKey) {
-      return NextResponse.json({ error: "MINIMAX_API_KEY is not configured" }, { status: 500 })
+      return NextResponse.json({ error: "MINIMAX_API_KEY 未配置" }, { status: 500 })
     }
 
-    // 构建消息列表
     const messages = [
       { role: "system", content: [{ type: "text", text: systemPrompt }] },
       ...body.history.map(m => ({ role: m.role, content: [{ type: "text", text: m.content }] })),
-      { role: "user", content: [{ type: "text", text: message }] }
+      { role: "user", content: [{ type: "text", text: message }] },
     ]
 
-    // 流式返回
     const encoder = new TextEncoder()
 
     const stream = new ReadableStream({
       async start(controller) {
+        const send = (obj: object) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
+        }
+
         try {
           await processWithTools(apiKey, baseUrl, messages, (chunk) => {
             try {
               const data = JSON.parse(chunk)
-              let chunkStr = ""
 
               if (data.type === "text") {
-                chunkStr = `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: data.content } })}\n`
+                send({ type: "content_block_delta", delta: { type: "text_delta", text: data.content } })
               } else if (data.type === "thinking") {
-                chunkStr = `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "thinking_delta", thinking: data.content } })}\n`
-              } else if (data.type === "status") {
-                // 状态消息不发送给前端，只用于调试
-                return
+                send({ type: "content_block_delta", delta: { type: "thinking_delta", thinking: data.content } })
+              } else if (data.type === "tool_call") {
+                send({ type: "tool_call", tool: data.tool })
+              } else if (data.type === "tool_result") {
+                send({ type: "tool_result", tool: data.tool, success: data.success })
               }
-
-              if (chunkStr) {
-                controller.enqueue(encoder.encode(chunkStr))
-              }
-            } catch (e) {}
+            } catch {}
           })
 
-          controller.enqueue(encoder.encode("data: [DONE]\n"))
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           controller.close()
         } catch (error: any) {
           console.error("Stream error:", error)
-          const errorStr = `data: ${JSON.stringify({ type: "error", error: error.message })}\n`
-          controller.enqueue(encoder.encode(errorStr))
+          send({ type: "error", error: error.message })
           controller.close()
         }
-      }
+      },
     })
 
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-      }
+        Connection: "keep-alive",
+      },
     })
   } catch (error: any) {
     console.error("Chat API error:", error)

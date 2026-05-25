@@ -1,74 +1,124 @@
 "use client"
 
-import { useState, useCallback, useRef, useMemo } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Bot, Send, Loader2, User, MessageCircle, Copy, Check, RotateCcw } from "lucide-react"
+import { useState, useCallback, useRef, useEffect } from "react"
+import {
+  Bot, Send, Square, Trash2, Copy, Check, RotateCcw,
+  ChevronDown, ChevronRight, Sparkles,
+  CheckCircle2, XCircle, Loader2, Wrench,
+} from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { cn } from "@/lib/utils"
 
-// 过滤工具调用标记
-function cleanToolCalls(text: string): string {
-  return text
-    .replace(/<invoke\s+name="[^"]*">\s*<\/invoke>/g, '')
-    .replace(/<invoke\s+name="[^"]*">[\s\S]*?<\/invoke>/g, '')
-    .replace(/<tool_code>[\s\S]*?<\/tool_code>/g, '')
-    .replace(/\[TOOL_CALL\]\s*\{[\s\S]*?\}\s*\[\/TOOL_CALL\]/g, '')
-    .replace(/minimax:tool_call\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/```[\s\S]*?```/g, '')
-    .trim()
+// ─────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────
+type ToolStatus = "running" | "success" | "error"
+
+interface ToolExecution {
+  name: string
+  status: ToolStatus
 }
 
-// 简化的 chat hook - 使用原生 fetch
-function useChatStream(api: string) {
-  const [messages, setMessages] = useState<{ id: string; role: "user" | "assistant"; content: string; reasoning?: string; status?: string }[]>([])
+interface ChatMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  reasoning?: string
+  toolExecutions?: ToolExecution[]
+  isStreaming?: boolean
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Tool name → display label
+// ─────────────────────────────────────────────────────────────────
+const TOOL_LABELS: Record<string, string> = {
+  list_customers: "查询客户列表",
+  get_customer: "获取客户详情",
+  create_customer: "创建客户",
+  list_opportunities: "查询商机",
+  get_opportunity: "获取商机详情",
+  create_opportunity: "创建商机",
+  list_contracts: "查询合同列表",
+  get_contract: "获取合同详情",
+  create_contract: "创建合同",
+  list_invoices: "查询发票",
+  create_invoice: "创建发票",
+  list_payments: "查询付款记录",
+  create_payment: "创建付款记录",
+  list_projects: "查询项目列表",
+  list_visits: "查询拜访记录",
+  create_visit: "创建拜访",
+  complete_visit: "完成拜访",
+  get_statistics: "获取数据统计",
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Suggested prompts (empty state)
+// ─────────────────────────────────────────────────────────────────
+const SUGGESTIONS = [
+  { label: "查看所有客户", icon: "👥" },
+  { label: "本月合同情况", icon: "📄" },
+  { label: "当前商机状态", icon: "🎯" },
+  { label: "逾期付款情况", icon: "⚠️" },
+  { label: "进行中的项目", icon: "📋" },
+  { label: "今日拜访安排", icon: "📅" },
+]
+
+// ─────────────────────────────────────────────────────────────────
+// useChatStream hook
+// ─────────────────────────────────────────────────────────────────
+function useChatStream() {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
-  const abortControllerRef = useRef<AbortController | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
-  const sendMessage = useCallback(async (message: string) => {
-    if (!message.trim() || isLoading) return
+  const updateMessage = useCallback((id: string, updater: (m: ChatMessage) => ChatMessage) => {
+    setMessages(prev => prev.map(m => m.id === id ? updater(m) : m))
+  }, [])
 
-    const userMessage = { id: `user-${Date.now()}`, role: "user" as const, content: message }
-    const assistantMessage = { id: `assistant-${Date.now()}`, role: "assistant" as const, content: "", reasoning: "" }
+  const sendMessage = useCallback(async (text: string) => {
+    if (!text.trim() || isLoading) return
 
-    setMessages(prev => [...prev, userMessage, assistantMessage])
+    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: "user", content: text }
+    const aiId = `a-${Date.now()}`
+    const aiMsg: ChatMessage = {
+      id: aiId,
+      role: "assistant",
+      content: "",
+      reasoning: "",
+      toolExecutions: [],
+      isStreaming: true,
+    }
+
+    setMessages(prev => [...prev, userMsg, aiMsg])
     setInput("")
     setIsLoading(true)
 
-    // 取消之前的请求
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-    }
-    abortControllerRef.current = new AbortController()
+    abortRef.current = new AbortController()
 
     try {
-      const response = await fetch(api, {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message,
+          message: text,
           history: messages
-            .filter(m => m.role === "user" || (m.role === "assistant" && m.content))
-            .map(m => ({ role: m.role, content: m.content }))
+            .filter(m => m.content)
+            .map(m => ({ role: m.role, content: m.content })),
         }),
-        signal: abortControllerRef.current.signal
+        signal: abortRef.current.signal,
       })
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || `请求失败 (${response.status})`)
-      }
-
-      if (!response.body) {
-        throw new Error("No response body")
+      if (!response.ok || !response.body) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.error || "请求失败")
       }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
-      let fullText = ""
-      let fullReasoning = ""
 
       while (true) {
         const { done, value } = await reader.read()
@@ -80,303 +130,441 @@ function useChatStream(api: string) {
 
         for (const line of lines) {
           const trimmed = line.trim()
-          if (!trimmed || !trimmed.startsWith("data:")) continue
-
-          const dataStr = trimmed.slice(5).trim()
-          if (!dataStr || dataStr === "[DONE]") continue
+          if (!trimmed.startsWith("data:")) continue
+          const raw = trimmed.slice(5).trim()
+          if (!raw || raw === "[DONE]") continue
 
           try {
-            const data = JSON.parse(dataStr)
+            const data = JSON.parse(raw)
 
-            // MiniMax 流式响应格式
             if (data.type === "content_block_delta") {
               const delta = data.delta
-              if (delta?.type === "text_delta") {
-                fullText += delta.text || ""
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantMessage.id
-                    ? { ...m, content: fullText }
-                    : m
-                ))
-              } else if (delta?.type === "thinking_delta") {
-                fullReasoning += delta.thinking || delta.text || ""
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantMessage.id
-                    ? { ...m, reasoning: fullReasoning }
-                    : m
-                ))
+              if (delta?.type === "text_delta" && delta.text) {
+                updateMessage(aiId, m => ({ ...m, content: m.content + delta.text }))
+              } else if (delta?.type === "thinking_delta" && delta.thinking) {
+                updateMessage(aiId, m => ({ ...m, reasoning: (m.reasoning || "") + delta.thinking }))
               }
-            } else if (data.type === "status") {
-              // 状态消息，更新助手消息状态
-              setMessages(prev => prev.map(m =>
-                m.id === assistantMessage.id
-                  ? { ...m, status: data.content }
-                  : m
-              ))
+            } else if (data.type === "tool_call") {
+              updateMessage(aiId, m => ({
+                ...m,
+                toolExecutions: [...(m.toolExecutions || []), { name: data.tool, status: "running" }],
+              }))
+            } else if (data.type === "tool_result") {
+              updateMessage(aiId, m => ({
+                ...m,
+                toolExecutions: (m.toolExecutions || []).map(t =>
+                  t.name === data.tool ? { ...t, status: data.success ? "success" : "error" } : t
+                ),
+              }))
+            } else if (data.type === "error") {
+              updateMessage(aiId, m => ({ ...m, content: data.error || "发生错误" }))
             }
-          } catch (e) {
-            // 忽略解析错误
-          }
+          } catch {}
         }
       }
-    } catch (error: any) {
-      if (error.name !== "AbortError") {
-        setMessages(prev => prev.map(m =>
-          m.id === assistantMessage.id
-            ? { ...m, content: error.message || "抱歉，发生了错误" }
-            : m
-        ))
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        updateMessage(aiId, m => ({
+          ...m,
+          content: m.content || (err.message || "抱歉，发生了错误，请重试"),
+        }))
       }
     } finally {
+      updateMessage(aiId, m => ({ ...m, isStreaming: false }))
       setIsLoading(false)
-      abortControllerRef.current = null
+      abortRef.current = null
     }
-  }, [api, messages, isLoading])
-
-  const reload = useCallback(() => {
-    const lastUserMessage = [...messages].reverse().find(m => m.role === "user")
-    if (lastUserMessage) {
-      // 删除最后一条助手消息（保留用户消息）
-      setMessages(prev => {
-        const lastIndex = prev.findIndex(m => m.id === lastUserMessage.id)
-        return prev.slice(0, lastIndex + 1)
-      })
-      sendMessage(lastUserMessage.content)
-    }
-  }, [messages, sendMessage])
+  }, [messages, isLoading, updateMessage])
 
   const stop = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-      setIsLoading(false)
-    }
+    abortRef.current?.abort()
+    setIsLoading(false)
+    setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
   }, [])
 
-  return {
-    messages,
-    input,
-    setInput,
-    sendMessage,
-    isLoading,
-    reload,
-    stop
-  }
+  const regenerate = useCallback(() => {
+    const lastUser = [...messages].reverse().find(m => m.role === "user")
+    if (!lastUser || isLoading) return
+    setMessages(prev => {
+      const idx = prev.map(m => m.id).lastIndexOf(prev.filter(m => m.role === "assistant").at(-1)?.id ?? "")
+      return idx >= 0 ? prev.slice(0, idx) : prev
+    })
+    sendMessage(lastUser.content)
+  }, [messages, isLoading, sendMessage])
+
+  const clearMessages = useCallback(() => {
+    setMessages([])
+    setInput("")
+  }, [])
+
+  return { messages, input, setInput, sendMessage, isLoading, stop, regenerate, clearMessages }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// ToolChips component
+// ─────────────────────────────────────────────────────────────────
+function ToolChips({ executions }: { executions: ToolExecution[] }) {
+  if (executions.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-1.5 mb-3">
+      {executions.map((t, i) => (
+        <span
+          key={i}
+          className={cn(
+            "inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full border transition-all",
+            t.status === "running" && "bg-indigo-50 border-indigo-200 text-indigo-600",
+            t.status === "success" && "bg-emerald-50 border-emerald-200 text-emerald-700",
+            t.status === "error" && "bg-red-50 border-red-200 text-red-600"
+          )}
+        >
+          {t.status === "running" && <Loader2 className="w-3 h-3 animate-spin" />}
+          {t.status === "success" && <CheckCircle2 className="w-3 h-3" />}
+          {t.status === "error" && <XCircle className="w-3 h-3" />}
+          {TOOL_LABELS[t.name] ?? t.name}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ThinkingBlock component
+// ─────────────────────────────────────────────────────────────────
+function ThinkingBlock({ reasoning }: { reasoning: string }) {
+  const [open, setOpen] = useState(false)
+  if (!reasoning.trim()) return null
+  return (
+    <div className="mb-3 rounded-lg border border-amber-200 overflow-hidden">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-amber-50 hover:bg-amber-100 transition-colors text-left"
+      >
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />}
+        <span className="text-xs font-medium text-amber-700">查看思考过程</span>
+      </button>
+      {open && (
+        <div className="px-3 py-2.5 bg-amber-50/50 border-t border-amber-200">
+          <p className="text-xs text-amber-800 whitespace-pre-wrap font-mono leading-relaxed">{reasoning}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MessageBubble component
+// ─────────────────────────────────────────────────────────────────
+function MessageBubble({ message, onCopy, copied, onRegenerate, isLast, isLoading }: {
+  message: ChatMessage
+  onCopy: () => void
+  copied: boolean
+  onRegenerate: () => void
+  isLast: boolean
+  isLoading: boolean
+}) {
+  const isUser = message.role === "user"
+  const hasTools = (message.toolExecutions?.length ?? 0) > 0
+  const isThinking = message.isStreaming && !message.content && !hasTools
+
+  return (
+    <div className={cn("flex gap-3 group", isUser && "flex-row-reverse")}>
+      {/* Avatar */}
+      <div className="flex-shrink-0 mt-0.5">
+        {isUser ? (
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-sm">
+            <span className="text-white text-[11px] font-bold">你</span>
+          </div>
+        ) : (
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center shadow-sm">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-300" />
+          </div>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className={cn("flex flex-col max-w-[80%] min-w-0", isUser && "items-end")}>
+        {/* Bubble */}
+        <div
+          className={cn(
+            "rounded-2xl px-4 py-3 text-sm leading-relaxed",
+            isUser
+              ? "bg-indigo-600 text-white rounded-tr-sm shadow-sm shadow-indigo-200"
+              : "bg-white border border-gray-100 text-gray-800 rounded-tl-sm shadow-sm"
+          )}
+        >
+          {isUser ? (
+            <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : (
+            <>
+              {/* Tool execution chips */}
+              {hasTools && <ToolChips executions={message.toolExecutions!} />}
+
+              {/* Thinking */}
+              {message.reasoning && <ThinkingBlock reasoning={message.reasoning} />}
+
+              {/* Main content */}
+              {message.content ? (
+                <div className="prose prose-sm max-w-none prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200 prose-pre:rounded-lg prose-code:text-indigo-700 prose-code:bg-indigo-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:font-normal">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      pre: ({ children }) => (
+                        <pre className="overflow-x-auto text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg p-3 my-2">
+                          {children}
+                        </pre>
+                      ),
+                      code: ({ inline, children, ...props }: any) =>
+                        inline ? (
+                          <code className="text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded text-[0.8em]" {...props}>
+                            {children}
+                          </code>
+                        ) : (
+                          <code className="text-xs font-mono" {...props}>{children}</code>
+                        ),
+                      table: ({ children }) => (
+                        <div className="overflow-x-auto my-2">
+                          <table className="min-w-full border-collapse text-xs">{children}</table>
+                        </div>
+                      ),
+                      th: ({ children }) => (
+                        <th className="border border-gray-200 bg-gray-50 px-3 py-1.5 text-left font-semibold text-gray-700">{children}</th>
+                      ),
+                      td: ({ children }) => (
+                        <td className="border border-gray-200 px-3 py-1.5 text-gray-700">{children}</td>
+                      ),
+                    }}
+                  >
+                    {message.content}
+                  </ReactMarkdown>
+                </div>
+              ) : isThinking ? (
+                <div className="flex items-center gap-2 text-gray-400 py-0.5">
+                  <span className="text-sm">思考中</span>
+                  <span className="flex gap-0.5">
+                    {[0, 150, 300].map(delay => (
+                      <span
+                        key={delay}
+                        className="w-1.5 h-1.5 rounded-full bg-gray-300 animate-bounce"
+                        style={{ animationDelay: `${delay}ms` }}
+                      />
+                    ))}
+                  </span>
+                </div>
+              ) : hasTools && message.isStreaming ? (
+                <div className="flex items-center gap-2 text-gray-400 py-0.5">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span className="text-sm">处理中...</span>
+                </div>
+              ) : null}
+
+              {/* Streaming cursor */}
+              {message.isStreaming && message.content && (
+                <span className="inline-block w-0.5 h-4 bg-indigo-500 ml-0.5 animate-pulse align-middle" />
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Actions (show on hover for AI messages) */}
+        {!isUser && message.content && !message.isStreaming && (
+          <div className="flex items-center gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={onCopy}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-all"
+            >
+              {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+              {copied ? "已复制" : "复制"}
+            </button>
+            {isLast && !isLoading && (
+              <button
+                onClick={onRegenerate}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-all"
+              >
+                <RotateCcw className="w-3 h-3" />
+                重新生成
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Empty state
+// ─────────────────────────────────────────────────────────────────
+function EmptyState({ onSend }: { onSend: (text: string) => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full pb-8 px-4">
+      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-xl shadow-indigo-200 mb-5">
+        <Sparkles className="w-7 h-7 text-white" />
+      </div>
+      <h2 className="text-xl font-bold text-gray-900 mb-1.5">AI 智能助手</h2>
+      <p className="text-sm text-gray-500 text-center mb-8 max-w-xs leading-relaxed">
+        我可以帮您查询客户、合同、商机、项目等 CRM 数据，也可以帮您创建记录。
+      </p>
+      <div className="grid grid-cols-2 gap-2 w-full max-w-md">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.label}
+            onClick={() => onSend(s.label)}
+            className="flex items-center gap-2.5 px-4 py-3 bg-white border border-gray-200 rounded-xl text-sm text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 transition-all text-left shadow-sm hover:shadow-md"
+          >
+            <span className="text-base leading-none">{s.icon}</span>
+            {s.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Main ChatPage
+// ─────────────────────────────────────────────────────────────────
 export default function ChatPage() {
+  const { messages, input, setInput, sendMessage, isLoading, stop, regenerate, clearMessages } = useChatStream()
   const [copiedId, setCopiedId] = useState<string | null>(null)
-  const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({})
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const { messages, input, setInput, sendMessage, isLoading, reload, stop } = useChatStream("/api/chat")
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [messages])
 
-  const handleSubmit = useCallback((e: React.FormEvent) => {
-    e.preventDefault()
+  // Auto-resize textarea
+  const adjustHeight = () => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.style.height = "auto"
+    ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`
+  }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value)
+    adjustHeight()
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
+  }
+
+  const handleSend = () => {
     if (!input.trim() || isLoading) return
     sendMessage(input)
-  }, [input, sendMessage, isLoading])
+    if (textareaRef.current) textareaRef.current.style.height = "auto"
+  }
 
-  const copyMessage = (content: string, id: string) => {
-    navigator.clipboard.writeText(content)
+  const handleCopy = (content: string, id: string) => {
+    navigator.clipboard.writeText(content).catch(() => {})
     setCopiedId(id)
     setTimeout(() => setCopiedId(null), 2000)
   }
 
-  const quickQuestions = [
-    "查看所有合同",
-    "查看所有客户",
-    "查看所有商机",
-    "查看付款情况",
-    "数据统计"
-  ]
-
-  // 添加欢迎消息
-  const allMessages = messages.length === 0 ? [
-    { id: "welcome", role: "assistant" as const, content: "您好！我是您的智能CRM助手。我可以帮助您查询：\n\n• 合同信息（查看合同、付款情况）\n• 客户信息\n• 商机状态\n• 项目进度\n• 发票记录\n• 数据统计\n\n请直接告诉我您想查询什么，例如：\n「查看所有合同」或「马丁的合同付款多少了」" }
-  ] : messages
+  const lastAiIndex = [...messages].map((m, i) => ({ m, i })).filter(({ m }) => m.role === "assistant").at(-1)?.i ?? -1
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] max-w-4xl mx-auto">
-      <Card className="flex flex-col h-full border-0 shadow-none bg-background">
-        <CardHeader className="flex-shrink-0 border-b px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                <Bot className="w-5 h-5 text-primary" />
-              </div>
-              <div>
-                <CardTitle className="text-lg font-semibold">AI 助手</CardTitle>
-                <p className="text-sm text-muted-foreground">智能查询 CRM 数据</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground flex items-center gap-1">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                在线
-              </span>
-            </div>
+    <div className="flex flex-col -m-4 md:-m-6 h-[calc(100vh-4rem)]">
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between px-5 h-14 border-b border-gray-100 bg-white flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
+            <Sparkles className="w-4 h-4 text-white" />
           </div>
-        </CardHeader>
-
-        <div className="flex-shrink-0 px-6 py-3 border-b bg-muted/30">
-          <p className="text-xs text-muted-foreground mb-2">快捷问题：</p>
-          <div className="flex flex-wrap gap-2">
-            {quickQuestions.map((q, i) => (
-              <Button
-                key={i}
-                variant="outline"
-                size="sm"
-                className="text-xs h-7 hover:bg-primary/10"
-                onClick={() => sendMessage(q)}
-                disabled={isLoading}
-              >
-                {q}
-              </Button>
-            ))}
+          <div>
+            <h1 className="text-sm font-semibold text-gray-900 leading-none">AI 助手</h1>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span className="text-[10px] text-gray-400">在线</span>
+            </div>
           </div>
         </div>
+        {messages.length > 0 && (
+          <button
+            onClick={clearMessages}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            清空对话
+          </button>
+        )}
+      </div>
 
-        <CardContent className="flex-1 overflow-hidden p-0">
-          <div className="h-full overflow-y-auto px-6 py-4 space-y-6">
-            {allMessages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex gap-4 ${message.role === "user" ? "flex-row-reverse" : ""}`}
-              >
-                {/* Avatar */}
-                <div className={`flex-shrink-0 ${message.role === "user" ? "order-2" : ""}`}>
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    message.role === "user" ? "bg-primary" : "bg-primary/10"
-                  }`}>
-                    {message.role === "user" ? (
-                      <User className="w-4 h-4 text-primary-foreground" />
-                    ) : (
-                      <Bot className="w-4 h-4 text-primary" />
-                    )}
-                  </div>
-                </div>
-
-                {/* Content */}
-                <div className={`flex-1 max-w-[85%] ${message.role === "user" ? "order-1" : ""}`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium">
-                      {message.role === "user" ? "你" : "AI 助手"}
-                    </span>
-                  </div>
-
-                  <div className={`rounded-2xl px-4 py-3 ${
-                    message.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted"
-                  }`}>
-                    {/* Reasoning (思考过程) */}
-                    {message.role === "assistant" && message.reasoning && (
-                      <div className="mb-3 border-l-2 border-yellow-500 pl-3">
-                        <button
-                          onClick={() => setExpandedReasoning(prev => ({ ...prev, [message.id]: !prev[message.id] }))}
-                          className="flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400 hover:underline mb-1"
-                        >
-                          <span>{expandedReasoning[message.id] ? "▼" : "▶"}</span>
-                          <span>思考过程</span>
-                        </button>
-                        {expandedReasoning[message.id] && (
-                          <div className="mt-2 text-xs text-yellow-700 dark:text-yellow-300 whitespace-pre-wrap font-mono bg-yellow-50 dark:bg-yellow-900/30 p-2 rounded">
-                            {message.reasoning}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="flex items-start gap-2">
-                      {message.role === "assistant" && (
-                        <MessageCircle className="w-4 h-4 mt-1 flex-shrink-0 text-primary" />
-                      )}
-                      {message.role === "user" ? (
-                        <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
-                      ) : (
-                        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-                          {message.content ? (
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {cleanToolCalls(message.content)}
-                            </ReactMarkdown>
-                          ) : isLoading && message.id === allMessages[allMessages.length - 1]?.id ? (
-                            <span className="text-muted-foreground">正在思考...
-                              <span className="inline-flex ml-1">
-                                <span className="w-1 h-1 bg-current rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                                <span className="w-1 h-1 bg-current rounded-full animate-bounce mx-0.5" style={{ animationDelay: "150ms" }} />
-                                <span className="w-1 h-1 bg-current rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                              </span>
-                            </span>
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Message Actions */}
-                    {message.role === "assistant" && message.content && (
-                      <div className="flex items-center gap-1 mt-2 pt-2 border-t border-current/10">
-                        <button
-                          onClick={() => copyMessage(message.content, message.id)}
-                          className="p-1.5 rounded hover:bg-current/10 text-current/60"
-                          title="复制"
-                        >
-                          {copiedId === message.id ? (
-                            <Check className="w-3.5 h-3.5" />
-                          ) : (
-                            <Copy className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                        <button
-                          onClick={() => reload()}
-                          className="p-1.5 rounded hover:bg-current/10 text-current/60"
-                          title="重新生成"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-
-        <div className="flex-shrink-0 p-4 border-t bg-background">
-          <form onSubmit={handleSubmit} className="flex gap-3 items-end">
-            <div className="flex-1">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault()
-                    handleSubmit(e)
-                  }
-                }}
-                placeholder="输入您的问题..."
-                disabled={isLoading}
-                rows={1}
-                className="w-full bg-background border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50 resize-none min-h-[44px] max-h-32"
+      {/* ── Messages ───────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto bg-gray-50/60">
+        {messages.length === 0 ? (
+          <EmptyState onSend={sendMessage} />
+        ) : (
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+            {messages.map((msg, idx) => (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                onCopy={() => handleCopy(msg.content, msg.id)}
+                copied={copiedId === msg.id}
+                onRegenerate={regenerate}
+                isLast={idx === lastAiIndex}
+                isLoading={isLoading}
               />
-            </div>
-            <Button
-              type="submit"
-              disabled={isLoading || !input.trim()}
-              size="icon"
-              className="h-11 w-11 rounded-xl"
-            >
+            ))}
+            <div ref={bottomRef} />
+          </div>
+        )}
+      </div>
+
+      {/* ── Input area ─────────────────────────────────────────── */}
+      <div className="flex-shrink-0 bg-white border-t border-gray-100 px-4 py-3">
+        <div className="max-w-3xl mx-auto">
+          <div className={cn(
+            "flex items-end gap-2 bg-white border rounded-2xl px-4 py-3 transition-all shadow-sm",
+            "focus-within:border-indigo-300 focus-within:shadow-indigo-100 focus-within:shadow-md"
+          )}>
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder="发送消息…  Shift+Enter 换行"
+              disabled={isLoading}
+              rows={1}
+              className="flex-1 resize-none bg-transparent text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none min-h-[24px] max-h-40 leading-relaxed disabled:opacity-60"
+            />
+            <div className="flex items-center gap-1.5 flex-shrink-0 pb-0.5">
               {isLoading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <button
+                  onClick={stop}
+                  className="w-8 h-8 rounded-xl bg-red-500 hover:bg-red-600 flex items-center justify-center transition-colors shadow-sm"
+                  title="停止生成"
+                >
+                  <Square className="w-3.5 h-3.5 text-white fill-white" />
+                </button>
               ) : (
-                <Send className="w-4 h-4" />
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim()}
+                  className={cn(
+                    "w-8 h-8 rounded-xl flex items-center justify-center transition-all shadow-sm",
+                    input.trim()
+                      ? "bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
+                      : "bg-gray-100 text-gray-300 cursor-not-allowed"
+                  )}
+                  title="发送 (Enter)"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </button>
               )}
-            </Button>
-          </form>
-          <p className="text-xs text-muted-foreground text-center mt-2">
-            AI 可能会产生错误信息，请核实重要内容
+            </div>
+          </div>
+          <p className="text-center text-[10px] text-gray-400 mt-2">
+            AI 可能产生错误，请核实重要信息
           </p>
         </div>
-      </Card>
+      </div>
     </div>
   )
 }

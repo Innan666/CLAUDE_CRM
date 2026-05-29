@@ -22,6 +22,7 @@ import {
   MessageCircle,
   ListTodo,
   Sparkles,
+  Handshake,
 } from "lucide-react"
 import { signOut } from "next-auth/react"
 
@@ -33,6 +34,7 @@ const navigation = [
       { name: "客户管理", href: "/dashboard/customers", icon: Users },
       { name: "商机管理", href: "/dashboard/opportunities", icon: Target },
       { name: "合同管理", href: "/dashboard/contracts", icon: FileText },
+      { name: "合作伙伴", href: "/dashboard/partners", icon: Handshake },
     ],
   },
   {

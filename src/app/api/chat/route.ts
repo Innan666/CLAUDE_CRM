@@ -21,14 +21,16 @@ async function getEntityIndex(teamId: string): Promise<{
   contracts: { id: string; name: string }[]
   projects: { id: string; name: string }[]
   suppliers: { id: string; name: string }[]
+  partners: { id: string; name: string }[]
 }> {
-  const [customers, opportunities, contracts, projects, suppliers, todos] = await Promise.all([
+  const [customers, opportunities, contracts, projects, suppliers, todos, partners] = await Promise.all([
     prisma.customer.findMany({ where: { teamId }, select: { id: true, name: true }, orderBy: { updatedAt: "desc" }, take: 50 }),
     prisma.opportunity.findMany({ where: { teamId }, select: { id: true, name: true, stage: true }, orderBy: { updatedAt: "desc" }, take: 30 }),
     prisma.contract.findMany({ where: { teamId }, select: { id: true, name: true, number: true, status: true }, orderBy: { updatedAt: "desc" }, take: 30 }),
     prisma.project.findMany({ where: { teamId }, select: { id: true, name: true, status: true }, orderBy: { updatedAt: "desc" }, take: 20 }),
     prisma.supplier.findMany({ where: { teamId }, select: { id: true, name: true, code: true }, orderBy: { updatedAt: "desc" }, take: 20 }),
     prisma.todo.findMany({ where: { teamId, status: { not: "DONE" } }, select: { id: true, title: true, priority: true }, orderBy: { createdAt: "desc" }, take: 15 }),
+    prisma.partner.findMany({ where: { teamId }, select: { id: true, name: true, type: true, status: true }, orderBy: { updatedAt: "desc" }, take: 20 }),
   ])
 
   const index = `【客户索引】${customers.map(c => `${c.name}[${c.id}]`).join("、") || "无"}
@@ -36,9 +38,10 @@ async function getEntityIndex(teamId: string): Promise<{
 【合同索引】${contracts.map(c => `${c.name}[${c.id}](${c.number},${c.status})`).join("、") || "无"}
 【项目索引】${projects.map(p => `${p.name}[${p.id}](${p.status})`).join("、") || "无"}
 【供应商索引】${suppliers.map(s => `${s.name}[${s.id}](${s.code})`).join("、") || "无"}
-【待办索引】${todos.map(t => `${t.title}[${t.id}](${t.priority})`).join("、") || "无"}`
+【待办索引】${todos.map(t => `${t.title}[${t.id}](${t.priority})`).join("、") || "无"}
+【合作伙伴索引】${partners.map(p => `${p.name}[${p.id}](${p.type},${p.status})`).join("、") || "无"}`
 
-  return { index, customers, opportunities, contracts, projects, suppliers }
+  return { index, customers, opportunities, contracts, projects, suppliers, partners }
 }
 
 // Layer 2: Fetch full details only for entities whose names appear in the current query.

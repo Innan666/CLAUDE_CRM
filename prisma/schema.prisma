@@ -88,6 +88,27 @@ enum SupplierStatus {
   INACTIVE
 }
 
+enum PartnerType {
+  AGENT
+  TECH
+  CHANNEL
+  STRATEGIC
+  OTHER
+}
+
+enum PartnerLevel {
+  GOLD
+  SILVER
+  BRONZE
+}
+
+enum PartnerStatus {
+  NEGOTIATING
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
 // Models
 
 model Team {
@@ -110,6 +131,7 @@ model Team {
   suppliers    Supplier[]
   payables     Payable[]
   todos        Todo[]
+  partners     Partner[]
 }
 
 model User {
@@ -495,4 +517,29 @@ enum Priority {
   MEDIUM
   HIGH
   URGENT
+}
+
+model Partner {
+  id           String        @id @default(cuid())
+  name         String
+  code         String        @unique
+  type         PartnerType   @default(OTHER)
+  level        PartnerLevel?
+  status       PartnerStatus @default(NEGOTIATING)
+  contact      String?
+  phone        String?
+  email        String?
+  address      String?
+  industry     String?
+  region       String?
+  capabilities String?
+  tags         String[]
+  startDate    DateTime?
+  endDate      DateTime?
+  notes        String?
+  teamId       String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 }

@@ -480,6 +480,75 @@ export const allTools: Tool[] = [
       },
     },
   },
+  // ── Partner ─────────────────────────────────────────────────────
+  {
+    name: "list_partners",
+    description: "查询合作伙伴列表，支持按名称/行业搜索、类型/状态筛选",
+    inputSchema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "搜索关键词（名称/联系人/行业）" },
+        type: { type: "string", description: "AGENT | TECH | CHANNEL | STRATEGIC | OTHER" },
+        status: { type: "string", description: "NEGOTIATING | ACTIVE | SUSPENDED | TERMINATED" },
+        limit: { type: "number", description: "返回数量，默认20" },
+      },
+    },
+  },
+  {
+    name: "get_partner",
+    description: "获取合作伙伴详情",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "合作伙伴ID" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "create_partner",
+    description: "创建合作伙伴",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "名称（必填）" },
+        type: { type: "string", description: "AGENT | TECH | CHANNEL | STRATEGIC | OTHER" },
+        level: { type: "string", description: "GOLD | SILVER | BRONZE（可选）" },
+        status: { type: "string", description: "NEGOTIATING | ACTIVE | SUSPENDED | TERMINATED" },
+        contact: { type: "string", description: "联系人" },
+        phone: { type: "string", description: "电话" },
+        email: { type: "string", description: "邮箱" },
+        industry: { type: "string", description: "擅长行业" },
+        region: { type: "string", description: "覆盖地区" },
+        capabilities: { type: "string", description: "核心能力描述" },
+        tags: { type: "array", items: { type: "string" }, description: "业务资源标签数组" },
+        startDate: { type: "string", description: "合作开始日期（ISO格式）" },
+        notes: { type: "string", description: "备注" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "update_partner",
+    description: "更新合作伙伴信息（如状态、等级、联系方式等）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "合作伙伴ID" },
+        name: { type: "string" },
+        type: { type: "string" },
+        level: { type: "string" },
+        status: { type: "string" },
+        contact: { type: "string" },
+        phone: { type: "string" },
+        email: { type: "string" },
+        industry: { type: "string" },
+        region: { type: "string" },
+        capabilities: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+        notes: { type: "string" },
+      },
+      required: ["id"],
+    },
+  },
 ]
 
 // ─────────────────────────────────────────────────────────────────
@@ -1019,6 +1088,84 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
             pipeline,
           },
         }
+      }
+
+      // ── Partner ─────────────────────────────────────────────────
+      case "list_partners": {
+        const where: any = { teamId }
+        if (args.search) {
+          where.OR = [
+            { name: { contains: args.search, mode: "insensitive" } },
+            { contact: { contains: args.search, mode: "insensitive" } },
+            { industry: { contains: args.search, mode: "insensitive" } },
+            { region: { contains: args.search, mode: "insensitive" } },
+          ]
+        }
+        if (args.type) where.type = args.type
+        if (args.status) where.status = args.status
+        const data = await prisma.partner.findMany({
+          where,
+          orderBy: { updatedAt: "desc" },
+          take: args.limit || 20,
+        })
+        return { success: true, data }
+      }
+
+      case "get_partner": {
+        const data = await prisma.partner.findFirst({ where: { id: args.id, teamId } })
+        if (!data) return { success: false, error: "合作伙伴不存在或无权访问" }
+        return { success: true, data }
+      }
+
+      case "create_partner": {
+        if (!args.name?.trim()) return { success: false, error: "名称不能为空" }
+        const code = `PTN-${Date.now()}`
+        const data = await prisma.partner.create({
+          data: {
+            name: args.name.trim(),
+            code,
+            type: args.type || "OTHER",
+            level: args.level || null,
+            status: args.status || "NEGOTIATING",
+            contact: args.contact || null,
+            phone: args.phone || null,
+            email: args.email || null,
+            address: args.address || null,
+            industry: args.industry || null,
+            region: args.region || null,
+            capabilities: args.capabilities || null,
+            tags: Array.isArray(args.tags) ? args.tags : [],
+            startDate: parseDate(args.startDate),
+            endDate: parseDate(args.endDate),
+            notes: args.notes || null,
+            teamId,
+          },
+        })
+        return { success: true, data }
+      }
+
+      case "update_partner": {
+        const exists = await prisma.partner.findFirst({ where: { id: args.id, teamId } })
+        if (!exists) return { success: false, error: "合作伙伴不存在或无权访问" }
+        const { id, ...rest } = args
+        const updateData: any = {}
+        if (rest.name !== undefined) updateData.name = rest.name.trim()
+        if (rest.type !== undefined) updateData.type = rest.type
+        if (rest.level !== undefined) updateData.level = rest.level || null
+        if (rest.status !== undefined) updateData.status = rest.status
+        if (rest.contact !== undefined) updateData.contact = rest.contact || null
+        if (rest.phone !== undefined) updateData.phone = rest.phone || null
+        if (rest.email !== undefined) updateData.email = rest.email || null
+        if (rest.address !== undefined) updateData.address = rest.address || null
+        if (rest.industry !== undefined) updateData.industry = rest.industry || null
+        if (rest.region !== undefined) updateData.region = rest.region || null
+        if (rest.capabilities !== undefined) updateData.capabilities = rest.capabilities || null
+        if (rest.tags !== undefined) updateData.tags = Array.isArray(rest.tags) ? rest.tags : []
+        if (rest.startDate !== undefined) updateData.startDate = parseDate(rest.startDate)
+        if (rest.endDate !== undefined) updateData.endDate = parseDate(rest.endDate)
+        if (rest.notes !== undefined) updateData.notes = rest.notes || null
+        const data = await prisma.partner.update({ where: { id }, data: updateData })
+        return { success: true, data }
       }
 
       default:
